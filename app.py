@@ -1,182 +1,205 @@
-import streamlit as st
-from code_analyzer import CodeAnalyzer
+from flask import Flask, request, jsonify, render_template, Response, stream_with_context, send_from_directory
+from flask_cors import CORS
+import os
+import json
+import logging
+import socket
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
+from docx import Document
 from llm_service import LLMService
+from code_analyzer import CodeAnalyzer
 from knowledge_manager import KnowledgeManager
 from prompts import SYSTEM_PROMPT, KNOWLEDGE_PANEL_PROMPT
-import json
 
-# Page Configuration
-st.set_page_config(
-    page_title="Python 学习助手 - 引导式教学",
-    page_icon="🐍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-# Custom CSS to mimic Coze style (simplified)
-st.markdown("""
-<style>
-    .main {
-        background-color: #f8f9fa;
-    }
-    .stChatFloatingInputContainer {
-        bottom: 20px;
-    }
-    .panel-container {
-        border-radius: 10px;
-        background-color: white;
-        padding: 20px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        height: 100%;
-    }
-</style>
-""", unsafe_allow_html=True)
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Session State Initialization
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ======================================================
+# 【关键配置区】 - 修改此处来调整您的 API Key
+# ======================================================
+# 优先从环境变量读取，如果不存在则使用硬编码（不建议在生产环境硬编码）
+HARDCODED_API_KEY = os.environ.get("API_KEY", "sk-fcpopflkqdeekzoqqneycwcmanrcznzrimnggvcmanyqedry") 
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507") 
 
-if "code" not in st.session_state:
-    st.session_state.code = "print('Hello, Python Learner!')"
+# ======================================================
 
-if "analysis_result" not in st.session_state:
-    st.session_state.analysis_result = None
+app = Flask(__name__)
+CORS(app)
 
-if "knowledge_summary" not in st.session_state:
-    st.session_state.knowledge_summary = "### 📚 准备开始\n\n欢迎来到 Python 引导式学习。请在中间栏和我打个招呼吧！"
+# 初始化服务
+llm_service = LLMService(api_key=HARDCODED_API_KEY, model=DEFAULT_MODEL)
+analyzer = CodeAnalyzer()
+km = KnowledgeManager()
 
-# Services
-@st.cache_resource
-def get_llm_service():
-    return LLMService()
+def get_host_ip():
+    """获取本机局域网 IP"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
+    return ip
 
-@st.cache_resource
-def get_analyzer():
-    return CodeAnalyzer()
-
-@st.cache_resource
-def get_knowledge_manager():
-    return KnowledgeManager()
-
-llm_service = get_llm_service()
-analyzer = get_analyzer()
-km = get_knowledge_manager()
-
-# Sidebar for configuration
-with st.sidebar:
-    st.title("⚙️ 设置")
-    api_key = st.text_input("Gemini API Key", type="password", placeholder="Enter your Gemini API Key")
-    model_name = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"])
+def generate_qr_startup(port=5000):
+    """启动时生成二维码"""
+    if not qrcode:
+        logger.warning("未安装 qrcode 库，跳过二维码生成。")
+        return
+        
+    local_ip = get_host_ip()
+    local_url = f"http://{local_ip}:{port}"
     
-    if api_key:
-        import google.generativeai as genai
-        llm_service.api_key = api_key
-        llm_service.model_name = model_name
-        genai.configure(api_key=api_key)
-        llm_service.model = genai.GenerativeModel(model_name)
-
-    st.divider()
-    st.subheader("🎓 个人中心")
-    st.write(km.get_summary())
-    if st.button("重置学习进度"):
-        km.data = {"current_topic": "Python 基础", "completed_topics": [], "concepts_learned": [], "progress": 0}
-        km.save_data()
-        st.rerun()
-
-# 3-Column Layout
-col_left, col_center, col_right = st.columns([1, 2, 1.5])
-
-# LEFT: Knowledge & Instructions Panel
-with col_left:
-    st.subheader("📋 知识面板")
-    st.markdown(st.session_state.knowledge_summary)
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(local_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
     
-    # Progress tracker
-    progress = st.progress(km.data.get("progress", 0))
-    st.caption(f"当前进度: {km.data.get('progress', 0)}%")
-
-# CENTER: Main Chat Panel
-with col_center:
-    st.subheader("💬 导师对话")
+    # 存放在 static 目录供前端显示或仅在本地生成
+    qr_path = "server_qr.png"
+    img.save(qr_path)
     
-    # Display chat history
-    chat_container = st.container(height=500)
-    for message in st.session_state.messages:
-        with chat_container.chat_message(message["role"]):
-            st.markdown(message["content"])
+    print("\n" + "="*50)
+    print("🚀 导师系统已启动！")
+    print(f"🔗 本地访问地址: http://127.0.0.1:{port}")
+    print(f"📱 局域网访问地址: {local_url}")
+    print(f"📸 二维码已生成: {os.path.abspath(qr_path)}")
+    print("="*50 + "\n")
 
-    # Chat input
-    if prompt := st.chat_input("向导师提问或展示你的代码思路..."):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with chat_container.chat_message("user"):
-            st.markdown(prompt)
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-        # Get response from LLM
-        with chat_container.chat_message("assistant"):
-            response_placeholder = st.empty()
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    data = request.json
+    messages = data.get('messages', [])
+    
+    logger.info(f"收到聊天请求，消息条数: {len(messages)}")
+
+    def generate():
+        try:
+            full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+            has_output = False
             full_response = ""
+            for chunk in llm_service.chat_completion(full_messages):
+                if chunk:
+                    has_output = True
+                    full_response += chunk
+                    yield chunk
             
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}] + st.session_state.messages
-            
-            for chunk in llm_service.chat_completion(messages):
-                full_response += chunk
-                response_placeholder.markdown(full_response + "▌")
-            
-            response_placeholder.markdown(full_response)
-        
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-        
-        # Proactively update the knowledge panel in the background (mocking background task)
-        # In a real app, this could be a separate call to the LLM
-        # st.session_state.knowledge_summary = "Updating..." 
-
-# RIGHT: Code Editor & Analysis Panel
-with col_right:
-    st.subheader("💻 代码沙盒")
-    
-    # Simple code editor using text_area (can be upgraded to streamlit-code-editor)
-    code = st.text_area("在下方编写 Python 代码", value=st.session_state.code, height=300)
-    st.session_state.code = code
-    
-    col_btns = st.columns(2)
-    run_btn = col_btns[0].button("▶️ 运行代码", use_container_width=True)
-    analyze_btn = col_btns[1].button("🔍 分析代码", use_container_width=True)
-
-    if run_btn:
-        with st.spinner("正在运行..."):
-            output, error = analyzer.run_code(code)
-            
-            st.write("---")
-            if error:
-                st.error(f"❌ 运行错误:\n{error}")
+            if not has_output:
+                yield "导师正在思考中，请检查后端 API Key 配置。"
             else:
-                st.success("✅ 运行成功:")
-                st.code(output if output else "[无输出]")
+                # 对话结束后，触发知识萃取
+                try:
+                    # 提取最近 3 轮对话作为上下文，让萃取更准确
+                    context_history = messages[-6:] if len(messages) > 6 else messages
+                    context_text = "\n".join([f"{m['role']}: {m['content']}" for m in context_history])
+                    context_text += f"\nassistant: {full_response}"
 
-    if analyze_btn:
-        with st.spinner("深度分析中..."):
-            analysis = analyzer.analyze_structure(code)
-            st.write("---")
-            st.info("🤖 代码结构分析:")
+                    extract_messages = [
+                        {"role": "system", "content": KNOWLEDGE_PANEL_PROMPT},
+                        {"role": "user", "content": f"分析以下对话并更新学习状态：\n{context_text}"}
+                    ]
+                    
+                    extraction = ""
+                    for c in llm_service.chat_completion(extract_messages):
+                        extraction += c
+                    
+                    try:
+                        clean_json = extraction.strip().replace('```json', '').replace('```', '').strip()
+                        update_data = json.loads(clean_json)
+                        
+                        # 1. 更新已掌握概念（由模型判定）
+                        if "learned_concepts" in update_data:
+                            km.data["concepts_learned"] = list(set(km.data["concepts_learned"] + update_data["learned_concepts"]))
+                        
+                        # 2. 更新当前话题
+                        if "current_topic" in update_data:
+                            km.data["current_topic"] = update_data["current_topic"]
+                            
+                        km.save_data()
+                        logger.info(f"状态同步成功: Topic={km.data['current_topic']}")
+                    except Exception as json_err:
+                        logger.error(f"解析 JSON 失败: {str(json_err)}")
+                except Exception as e:
+                    logger.error(f"知识萃取失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"生成回复时出错: {str(e)}")
+            yield f"抱歉，发生了一个错误: {str(e)}"
+
+    return Response(stream_with_context(generate()), mimetype='text/plain')
+
+@app.route('/api/run_code', methods=['POST'])
+def run_code():
+    data = request.json
+    code = data.get('code', '')
+    output, error = analyzer.run_code(code)
+    return jsonify({'output': output, 'error': error})
+
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': '没有文件上传'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+    
+    filename = file.filename
+    ext = os.path.splitext(filename)[1].lower()
+    content = ""
+    
+    try:
+        if ext in ['.txt', '.py']:
+            content = file.read().decode('utf-8', errors='ignore')
+        elif ext in ['.docx']:
+            doc = Document(file)
+            full_text = []
+            for para in doc.paragraphs:
+                full_text.append(para.text)
+            content = '\n'.join(full_text)
+        elif ext == '.doc':
+            return jsonify({'error': '暂不支持旧版 .doc 格式，请另存为 .docx 后重试。'}), 400
+        else:
+            return jsonify({'error': f'不支持的文件类型: {ext}'}), 400
             
-            if "error" in analysis:
-                st.error(analysis["error"])
-            else:
-                # Display structural information
-                st.write(f"- **循环结构**: {'有' if analysis['has_loops'] else '无'}")
-                st.write(f"- **函数定义**: {'有' if analysis['has_functions'] else '无'}")
-                st.write(f"- **类定义**: {'有' if analysis['has_classes'] else '无'}")
-                st.write(f"- **导入模块**: {', '.join(analysis['imports']) if analysis['imports'] else '无'}")
-                st.write(f"- **变量数**: {analysis['variable_count']}")
-                st.write(f"- **注释数**: {analysis['comments_count']}")
+        return jsonify({'filename': filename, 'content': content})
+    except Exception as e:
+        logger.error(f"文件读取失败: {str(e)}")
+        return jsonify({'error': f'文件读取失败: {str(e)}'}), 500
 
-                # Ask the mentor to analyze the specific code
-                # Add a hidden message to get specific code feedback
-                analysis_prompt = f"请分析我这段代码的质量和逻辑，并给我一些改进建议，但不要直接给我最终代码：\n\n```python\n{code}\n```"
-                st.session_state.messages.append({"role": "user", "content": analysis_prompt})
-                st.rerun()
+@app.route('/api/knowledge', methods=['GET'])
+def get_knowledge():
+    return jsonify(km.data)
 
-# Footer
-st.divider()
-st.caption("由 Python 引导式学习智能体提供支持 | 关注过程，而非仅仅是结果。")
+@app.route('/api/reset_knowledge', methods=['POST'])
+def reset_knowledge():
+    km.data = {"current_topic": "待开始", "completed_topics": [], "concepts_learned": []}
+    km.save_data()
+    return jsonify(km.data)
+
+@app.route('/server_qr.png')
+def get_qr():
+    # 确保在访问时如果文件不存在则尝试生成
+    qr_path = os.path.join(os.getcwd(), 'server_qr.png')
+    if not os.path.exists(qr_path):
+        generate_qr_startup(port=5000)
+    return send_from_directory(os.getcwd(), 'server_qr.png', cache_timeout=0)
+
+if __name__ == '__main__':
+    # 每次启动时强制初始化知识状态（如果需要）
+    km.data = {"current_topic": "待开始", "completed_topics": [], "concepts_learned": []}
+    km.save_data()
+    
+    # 适配魔搭空间 (ModelScope Space) 或其他环境
+    port = int(os.environ.get("PORT", 7860))
+    generate_qr_startup(port=port)
+    logger.info(f"Flask 服务启动在 http://0.0.0.0:{port}")
+    app.run(host='0.0.0.0', port=port, debug=False)

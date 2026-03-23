@@ -44,7 +44,7 @@ if __name__ == "__main__":
     
     print("\n2. 如何使用:")
     print("   - 确保你的电脑和手机连接的是【同一个 Wi-Fi】。")
-    print(f"   - 确保 app_flask.py 正在运行 (python app_flask.py)。")
+    print(f"   - 确保 app.py 正在运行 (python app.py)。")
     print("   - 用手机扫描刚才生成的二维码图片即可打开。")
     
     print("\n3. 如果你想发布到真正的【公网】(任何人都能访问):")
